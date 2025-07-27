@@ -2,7 +2,11 @@ import json
 import re
 from langchain.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
+from transformers import AutoTokenizer, AutoModel, AutoModelForCausalLM
+import torch
 from tqdm import tqdm
+from openai import OpenAI
+from constants import API_KEY
 
 prompts = { "political_bias" : {
                 "system" : ("És especialista em política Portuguesa. Vais interpretar texto e identificar enviesamento político. "
@@ -71,6 +75,11 @@ prompts = { "political_bias" : {
             }
         }
 
+openai = OpenAI(
+    api_key=API_KEY,
+    base_url="https://api.deepinfra.com/v1/openai",
+)
+
 def process_descriptor_json(descriptor):
     json_object = json.loads(re.findall(r'\{.*?\}', descriptor)[0])
     return json_object["indicador"]
@@ -90,7 +99,7 @@ def get_score(descriptor, threshold, chroma_db, k):
     return axis_score
 
 # for political_bias, objectivity, and reliability
-def get_descriptor(test_set, axis, prompts, openai):
+def get_descriptors_llama(test_set, axis):
 
     descriptors = []
     for article in tqdm(test_set):
@@ -118,10 +127,61 @@ def get_descriptor(test_set, axis, prompts, openai):
         descriptors.append({"title" : article["title"], "descriptor" : processed_descriptor, "label" : article['label']})
 
         # saving at every iteration
-        with open(f"descriptors_70B_{axis}.json", "w", encoding="utf-8") as file:
+        with open(f"descriptors_llama_{axis}.json", "w", encoding="utf-8") as file:
             json.dump(descriptors, file, indent=4, ensure_ascii=False)
 
-def setup_db(axis):
-    embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-mpnet-base-v2")
-    vector_database = Chroma(persist_directory=f"./{axis}_db", embedding_function=embedding_model)
-    return vector_database
+def get_descriptor_eurollm(test_set, axis):
+
+    descriptors = []
+    
+    model_id = "utter-project/EuroLLM-9B-Instruct"
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16, device_map="auto")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    for article in tqdm(test_set):
+
+        system_prompt = prompts[axis][str(article["label"])]["system"]
+        user_prompt = prompts[axis][str(article["label"])]["user"] + article['text']
+
+        prompt_structure = [
+        {
+            "role": "system",
+            "content": system_prompt,
+        },
+        {
+            "role": "user",
+            "content": user_prompt,
+        },
+        ]
+
+        # tokenizing
+        formatted_news = tokenizer.apply_chat_template(prompt_structure, tokenize=False, add_generation_prompt=True)
+        inputs = tokenizer(formatted_news, return_tensors="pt", padding=True, truncation=True)
+
+        # moving tensors to GPU
+        input_ids = inputs["input_ids"].to(device)
+        attention_mask = inputs["attention_mask"].to(device)
+
+        with torch.no_grad():
+            outputs = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                pad_token_id=tokenizer.eos_token_id,
+                max_new_tokens=256,
+                do_sample=False
+            )
+
+        output_decoded = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        descriptor = output_decoded.split('assistant\n')[1]
+
+        try:
+            processed_descriptor = process_descriptor_json(descriptor)
+        except:
+            processed_descriptor = descriptor
+
+        descriptors.append({"title" : article["title"], "descriptor" : processed_descriptor, "label" : article['label']})
+
+        # saving at every iteration
+        with open(f"descriptors_eurollm_{axis}.json", "w", encoding="utf-8") as file:
+            json.dump(descriptors, file, indent=4, ensure_ascii=False)

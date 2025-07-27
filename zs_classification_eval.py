@@ -3,6 +3,8 @@ from tqdm import tqdm
 from openai import OpenAI
 import re
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from transformers import AutoTokenizer, AutoModel, AutoModelForCausalLM
+import torch
 from constants import API_KEY
 
 prompts = {
@@ -84,7 +86,7 @@ def process_output(output, axis):
     else:
         return "inconclusivo"
 
-def classify_articles(test_set, axis): 
+def classify_llama(test_set, axis): 
     zero_shot_classifications = []
 
     for article in tqdm(test_set):
@@ -111,12 +113,61 @@ def classify_articles(test_set, axis):
         zero_shot_classifications.append({"title" : article["title"], "label" : article["label"], "classification" : processed_classification})
 
         # saving at every iteration
-        with open(f"70B_zero_shot_{axis}.json", "w", encoding="utf-8") as file:
+        with open(f"llama_zero_shot_{axis}.json", "w", encoding="utf-8") as file:
             json.dump(zero_shot_classifications, file, indent=4, ensure_ascii=False)
 
-def eval(axis):
+def classify_eurollm(test_set, axis):
+    model_id = "utter-project/EuroLLM-9B-Instruct"
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16, device_map="auto")
 
-    with open(f"70B_zero_shot_{axis}.json", "r", encoding="utf-8") as file:
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model.to(device)
+
+    zero_shot_classifications = []
+
+    for article in tqdm(test_set):
+        prompt_structure = [
+            {"role": "system", "content": '{system_prompt}'},
+            {"role": "user", "content": '{user_prompt}'}]
+        
+        system_prompt = prompts[axis]["system"]
+        user_prompt = prompts[axis]["user"] + article['text']
+        
+        prompt_structure[0]["content"] = prompt_structure[0]["content"].format(system_prompt = system_prompt)
+        prompt_structure[1]["content"] = prompt_structure[1]["content"].format(user_prompt = user_prompt)
+
+        # tokenizing
+        formatted_news = tokenizer.apply_chat_template(prompt_structure, tokenize=False, add_generation_prompt=True)
+        inputs = tokenizer(formatted_news, return_tensors="pt", padding=True, truncation=True)
+
+        # moving tensors to GPU
+        input_ids = inputs["input_ids"].to(device)
+        attention_mask = inputs["attention_mask"].to(device)
+
+        with torch.no_grad():
+            outputs = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                pad_token_id=tokenizer.eos_token_id,
+                max_new_tokens=256,
+                do_sample=False)
+
+        output = tokenizer.decode(outputs[0], skip_special_tokens=True).split('assistant\n')[1]
+
+        try:
+            processed_classification = process_output(output)
+        except:
+            processed_classification = output
+
+        zero_shot_classifications.append({"title" : article["title"], "label" : article["label"], "classification" : processed_classification})
+
+        with open(f"eurollm_zero_shot_{axis}.json", "w", encoding="utf-8") as file:
+            json.dump(zero_shot_classifications, file, indent=4, ensure_ascii=False)
+
+def eval(axis, model):
+
+    with open(f"{model}_zero_shot_{axis}.json", "r", encoding="utf-8") as file:
         zero_shot_classifications = json.load(file)
 
     true_labels = [classif['label'] for classif in zero_shot_classifications]

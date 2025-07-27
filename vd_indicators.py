@@ -2,6 +2,8 @@ import json
 from langchain.vectorstores import Chroma
 from langchain.schema import Document
 from langchain_huggingface import HuggingFaceEmbeddings
+from transformers import AutoTokenizer, AutoModel, AutoModelForCausalLM
+import torch
 import re
 from tqdm import tqdm
 from openai import OpenAI
@@ -161,7 +163,7 @@ def process_indicator_json(indicator, axis, label):
     json_type = json_types[axis][label]
     return json_object[json_type]
 
-def get_indicators(train_set, axis):
+def get_indicators_llama(train_set, axis):
     indicators = {}
 
     for article in tqdm(train_set):
@@ -188,13 +190,68 @@ def get_indicators(train_set, axis):
         indicators[processed_indicator] = {'label' : article['label'], 'title' : article['title'], 'score' : article['score']}
 
         # saving at every iteration
-        with open(f"indicators_70B_{axis}.json", "w", encoding="utf-8") as file:
+        with open(f"indicators_llama_{axis}.json", "w", encoding="utf-8") as file:
             json.dump(indicators, file, indent=4, ensure_ascii=False)
 
+def get_indicators_eurollm(train_set, axis):
 
-def create_db(axis):
+    model_id = "utter-project/EuroLLM-9B-Instruct"
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16, device_map="auto")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    indicators = {}
+    for article in tqdm(train_set):
+
+        system_prompt = prompts[axis][str(article["label"])]["system"]
+        user_prompt = prompts[axis][str(article["label"])]["user"] + article['text']
+
+        prompt_structure = [
+        {
+            "role": "system",
+            "content": system_prompt,
+        },
+        {
+            "role": "user",
+            "content": user_prompt,
+        },
+        ]
+
+        # tokenizing
+        formatted_news = tokenizer.apply_chat_template(prompt_structure, tokenize=False, add_generation_prompt=True)
+        inputs = tokenizer(formatted_news, return_tensors="pt", padding=True, truncation=True)
+
+        # moving tensors to GPU
+        input_ids = inputs["input_ids"].to(device)
+        attention_mask = inputs["attention_mask"].to(device)
+
+        with torch.no_grad():
+            outputs = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                pad_token_id=tokenizer.eos_token_id,
+                max_new_tokens=256,
+                do_sample=False
+            )
+
+        output_decoded = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        indicator = output_decoded.split('assistant\n')[1]
+
+        try:
+            processed_indicator = process_indicator_json(indicator, objective=True)
+        except:
+            processed_indicator = indicator
+
+        indicators[processed_indicator] = {'label' : article['label'], 'title' : article['title'], 'score' : article['score']}
+
+        # saving at every iteration
+        with open(f"indicators_eurollm_{axis}.json", "w", encoding="utf-8") as file:
+            json.dump(indicators, file, indent=4, ensure_ascii=False)
+    
+
+def create_db(axis, model):
     # When running for the first time to setup the db's
-    with open(f"indicators_70B_{axis}.json", "r", encoding="utf-8") as file:
+    with open(f"indicators_{model}_{axis}.json", "r", encoding="utf-8") as file:
         indicators = json.load(file)
 
     indicators_doc = [
@@ -203,4 +260,4 @@ def create_db(axis):
 
     embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-mpnet-base-v2")
 
-    Chroma.from_documents(indicators_doc, embedding_model, collection_metadata={"hnsw:space": "cosine"}, persist_directory=f"./{axis}_db")
+    Chroma.from_documents(indicators_doc, embedding_model, collection_metadata={"hnsw:space": "cosine"}, persist_directory=f"./{model}_{axis}_db")

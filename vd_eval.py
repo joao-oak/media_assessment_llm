@@ -5,9 +5,10 @@ from tqdm import tqdm
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
 
-def setup_db(axis):
+def setup_db(model, axis):
+    # to create the DB variable when the DB is already set up
     embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-mpnet-base-v2")
-    vector_database = Chroma(persist_directory=f"./{axis}_db", embedding_function=embedding_model)
+    vector_database = Chroma(persist_directory=f"./{model}_{axis}_db", embedding_function=embedding_model)
     return vector_database
 
 def classify_descriptor(descriptor, threshold, vector_database, K):
@@ -25,19 +26,19 @@ def classify_descriptor(descriptor, threshold, vector_database, K):
 
     return axis_score
 
-def eval(axis):
+def eval(model, axis):
 
-    with open(f"descriptors_70B_{axis}.json", "r", encoding="utf-8") as file:
+    with open(f"descriptors_{model}_{axis}.json", "r", encoding="utf-8") as file:
         descriptors = json.load(file)
 
-    vector_database = setup_db(axis)
+    vector_database = setup_db(model, axis)
 
     for descriptor in tqdm(descriptors):
         descriptor_text = descriptor['descriptor']
-        axis_score = classify_descriptor(descriptor_text, 0.5, vector_database)
+        axis_score = classify_descriptor(descriptor_text, 0.5, vector_database, 50)
         descriptor['axis_score'] = axis_score
 
-    with open(f"descriptors_70B_{axis}_results.json", "w", encoding="utf-8") as file:
+    with open(f"descriptors_{model}_{axis}_results.json", "w", encoding="utf-8") as file:
         json.dump(descriptors, file, indent=4, ensure_ascii=False)
 
     true_labels = [descriptor['label'] for descriptor in descriptors]
